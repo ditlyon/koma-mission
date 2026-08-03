@@ -1,0 +1,1361 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>コマミッション</title>
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
+<link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="コマミッション" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body, #root { height: 100%; margin: 0; }
+  /* 画面一番下のボタン(保存・後日ぶんなど)が、iPhoneのホームバー操作領域と
+     被って押しづらくなる問題への対策。ボタンの見た目は変えず、その下に
+     安全な余白を追加してボタン自体を危険地帯から遠ざける。 */
+  .bottom-safe-spacer { height: calc(28px + env(safe-area-inset-bottom, 0px)); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!--
+  ===========================================================================
+  改修メモ(引き継ぎ用・最終更新 2026/07/31)
+  ===========================================================================
+  このファイルはこれまで複数回の改修を経ています。以下は現在の最終仕様です
+  (過去の変更履歴ではなく、"今こうなっている"という状態の説明です)。
+
+  ■ データ保存
+  保存先は localStorage ではなく Firebase(Cloud Firestore)。
+  localStorageはiPhoneのホーム画面追加アプリだと予告なくリセットされる
+  ことがあり、実際にデータ消失が発生したため切り替えた。Firestore接続に
+  失敗した場合のみ、保存の保険としてlocalStorageにフォールバックする。
+
+  Firestoreの保存場所: コレクション "komaMission" / ドキュメント "books"
+  中身: { booksJson: "<全本データのJSON文字列>", updatedAt: "<ISO日時>" }
+
+  ⚠ Firestoreは「テストモード」(誰でも読み書き可、30日間限定)で作成した。
+  期限が来る前に、Firebaseコンソール → Firestore Database → ルール タブで
+  下記に書き換える必要がある(期限なしで同じ内容になる):
+
+    rules_version = '2';
+    service cloud.firestore {
+      match /databases/{database}/documents {
+        match /komaMission/{docId} {
+          allow read, write: if true;
+        }
+      }
+    }
+
+  ■ 難易度・工程管理
+  難易度は低・中・高の3段階(「大ゴマ」という物理サイズの概念は廃止済み)。
+  コマの①アタリはページ単位ではなくコマ単位で管理し、同じページ内でも
+  コマごとに独立して①→②→③→④と進められる。ただし④仕上げだけは
+  「同じページの全コマの③線画が終わっている」ことが条件(仕上げ作業が
+  ページ全体に関わるため)。
+  表紙は①アタリ〜⑤仕上げの全工程をスライダー式の自己申告%で管理する。
+  スライダーは指を離した瞬間(onMouseUp/onTouchEnd)にのみ工程進行を判定する
+  (ドラッグ中の連続イベントで一気に複数工程が進んでしまう不具合の修正)。
+  コマ・表紙ともに「戻す」ボタンで1工程前(0%から)に戻せる。
+
+  ■ 今日のミッションの組み立て(ADHD特性を踏まえた設計)
+  1日の目安時間はあくまで目安。実際には目安の1.5倍まで許容してタスクを
+  積む。予算オーバーの単発タスクに当たっても打ち切らず、スキップして
+  その先も探し続ける。
+  奇数日は低難易度優先、偶数日は中難易度優先。ただし「優先難易度を
+  ひたすら消化する」のではなく、①その日の優先難易度を1個だけ露払いに
+  使う→②高難易度を必ず1個含める(予算オーバーでも保証)→③残りは
+  もう片方の難易度で埋めて、優先難易度は温存する→④それも尽きたら
+  優先難易度を追加投入、という順序で組み立てる。これは「低〜中難易度
+  ばかり早く消費して後半が高難易度だらけになる」「高難易度を無限に
+  回避し続けられる」という2つの悪癖を同時に防ぐための設計。
+  なお「3日以上動きのないコマに⚠を表示する」機能はかつて存在したが、
+  「今日のミッションに一度も出てきていないのに停滞扱いされる」という
+  不公平な誤判定を生むため廃止した。現在この種の警告表示は存在しない。
+
+  ■ ページ番号の考え方
+  表紙ウィジェット(表1・表4)とは別に、本文一覧の1番目は「表2」に
+  あたる。そのため本文一覧の表示ラベルは配列の並び順+2(P2, P3, P4...)
+  で計算している(bodyPageLabel関数)。本文ページは上下ボタンで並び替え
+  可能(表3を後方に動かす、等の用途)。
+
+  ■ 実装上の細かい注意点
+  ・タスクの識別番号(rowKey)はコマIDだけでなく工程名(atari/rough/senga/
+    shiage)も含む。これが無いと工程が進むたびに識別番号が使い回されて
+    しまい、「戻す」操作で無関係な完了記録まで巻き添えで消える不具合が
+    あった(修正済み)。
+  ・「今日」の日付判定はUTCではなく端末のローカル時間基準(todayStr)。
+    UTC基準のままだと日本時間の深夜〜朝、日付が変わったのに「まだ昨日」
+    と誤判定される不具合があった(修正済み)。
+  ・ミッション記録には schemaVersion(MISSION_SCHEMA_VERSION)を持たせて
+    あり、識別番号の形式を変えた時は、日付が同じ日でも強制的にその日の
+    ミッションを作り直す(形式の不整合で一覧が空に見える問題への対策)。
+  ・画面一番下のボタン(保存・後日ぶんなど)は、iPhoneのホームバー操作
+    領域と被って押しづらくならないよう、下に安全余白(bottom-safe-spacer)
+    を追加してある。
+
+  登録画面のタイトル入力欄の例文(プレースホルダー)は、実際の作品名では
+  ない汎用的な表示にしてある。
+  データの保存形式が変わった際は、旧データを起動時に自動でマイグレー
+  ションする(book.schemaVersion フィールドで判定、済んでいれば何もしない)。
+  ===========================================================================
+-->
+
+<!-- Firebase (Cloud Firestore) 接続。React本体とは独立したモジュールとして読み込み、
+     window.firebaseStorage に load()/save() を生やして、下の非モジュールscriptから
+     使えるようにする。 -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyA2eW5qoDvLEX2WjjGmGCy_WT6ny6Bpgxo",
+    authDomain: "koma-mission.firebaseapp.com",
+    projectId: "koma-mission",
+    storageBucket: "koma-mission.firebasestorage.app",
+    messagingSenderId: "302759536918",
+    appId: "1:302759536918:web:9ddd949c53368587b64837",
+    measurementId: "G-TSKW1F5VK6"
+  };
+
+  try {
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const docRef = doc(db, "komaMission", "books");
+
+    window.firebaseStorage = {
+      async load() {
+        try {
+          const snap = await getDoc(docRef);
+          if (snap.exists()) {
+            const data = snap.data();
+            return data && typeof data.booksJson === "string" ? data.booksJson : null;
+          }
+          return null;
+        } catch (e) {
+          console.error("Firestore load error", e);
+          throw e;
+        }
+      },
+      async save(booksJson) {
+        await setDoc(docRef, { booksJson, updatedAt: new Date().toISOString() });
+        return true;
+      },
+    };
+  } catch (e) {
+    console.error("Firebase init error", e);
+    window.firebaseStorage = null;
+  }
+</script>
+
+<script>
+const { useState, useEffect } = React;
+
+"use strict";
+/* ================= design tokens ================= */
+const C = {
+    paper: "#FFF9F0",
+    paperDeep: "#FFF3E1",
+    ink: "#241F1F",
+    inkSoft: "#5B5450",
+    pink: "#FF4FA0",
+    pinkDeep: "#E8348A",
+    mint: "#2FC69A",
+    amber: "#FFC93C",
+    red: "#FF4B3E",
+};
+/* ================= inline icon components ================= */
+function Icon({ size = 18, color = "currentColor", children }) {
+    return (React.createElement("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: color, strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, children));
+}
+const Plus = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M12 5v14M5 12h14" }));
+const ChevronLeft = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M15 18l-6-6 6-6" }));
+const ChevronDown = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M6 9l6 6 6-6" }));
+const ChevronUp = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M6 15l6-6 6 6" }));
+const Pencil = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M12 20h9" }),
+    React.createElement("path", { d: "M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" }));
+const Trash2 = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M3 6h18" }),
+    React.createElement("path", { d: "M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }),
+    React.createElement("path", { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" }),
+    React.createElement("path", { d: "M10 11v6" }),
+    React.createElement("path", { d: "M14 11v6" }));
+const Check = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M20 6L9 17l-5-5" }));
+const AlertTriangle = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" }),
+    React.createElement("path", { d: "M12 9v4" }),
+    React.createElement("path", { d: "M12 17h.01" }));
+const Sparkles = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M12 3l1.7 4.9L18.5 9l-4.8 1.7L12 15.5l-1.7-4.8L5.5 9l4.8-2.1Z" }));
+const X = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M18 6L6 18" }),
+    React.createElement("path", { d: "M6 6l12 12" }));
+const RotateCcw = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M3 12a9 9 0 1 0 3-6.7" }),
+    React.createElement("path", { d: "M3 3v6h6" }));
+const CloudCheck = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M17.5 19H9a7 7 0 1 1 6.71-9h.79a4.5 4.5 0 1 1 0 9Z" }),
+    React.createElement("path", { d: "M9 15l2 2 4-4" }));
+const CloudOff = (p) => React.createElement(Icon, { ...p },
+    React.createElement("path", { d: "M22.61 16.95A5 5 0 0 0 18 10h-1.26a8 8 0 0 0-7.05-6" }),
+    React.createElement("path", { d: "M5 5a8 8 0 0 0 4 15h9a5 5 0 0 0 1.7-.3" }),
+    React.createElement("path", { d: "M2 2l20 20" }));
+const FONT_DISPLAY = "'Mochiy Pop One', sans-serif";
+const FONT_BODY = "'M PLUS Rounded 1c', sans-serif";
+const FontLoader = () => (React.createElement("style", null, `
+    @import url('https://fonts.googleapis.com/css2?family=Mochiy+Pop+One&family=M+PLUS+Rounded+1c:wght@400;500;700;800&display=swap');
+    * { font-family: ${FONT_BODY}; }
+    .font-display { font-family: ${FONT_DISPLAY}; }
+    @keyframes popIn { 0% { transform: scale(0) rotate(-15deg); opacity:0; } 60% { transform: scale(1.15) rotate(6deg); opacity:1; } 100% { transform: scale(1) rotate(-8deg); opacity:1; } }
+    @keyframes confettiFall { 0% { transform: translateY(0) rotate(0deg); opacity:1; } 100% { transform: translateY(70px) rotate(360deg); opacity:0; } }
+    .stamp-pop { animation: popIn 0.35s cubic-bezier(.2,1.5,.4,1) forwards; }
+    .confetti-piece { animation: confettiFall 0.9s ease-out forwards; }
+  `));
+const inputStyle = { border: `2px solid ${C.ink}`, background: "#fff", fontFamily: FONT_BODY };
+
+/* ================= storage: Firebase(優先) + localStorage(保険) ================= */
+const LOCAL_KEY = "koma-mission-books";
+
+function waitForFirebase(timeoutMs) {
+    return new Promise((resolve) => {
+        const start = Date.now();
+        (function check() {
+            if (window.firebaseStorage !== undefined) return resolve(window.firebaseStorage);
+            if (Date.now() - start > timeoutMs) return resolve(null);
+            setTimeout(check, 50);
+        })();
+    });
+}
+function localLoad() {
+    try {
+        const v = window.localStorage.getItem(LOCAL_KEY);
+        return v || null;
+    }
+    catch (e) {
+        return null;
+    }
+}
+function localSave(json) {
+    try {
+        window.localStorage.setItem(LOCAL_KEY, json);
+        return true;
+    }
+    catch (e) {
+        return false;
+    }
+}
+/** Firestoreから読み込み。失敗・未接続ならlocalStorageにフォールバック。
+ *  戻り値: { json, source: "firebase"|"local"|"none" } */
+async function loadBooksJson() {
+    const fs = await waitForFirebase(4000);
+    if (fs) {
+        try {
+            const json = await fs.load();
+            if (json)
+                return { json, source: "firebase" };
+            // Firestoreは空(初回など)。ローカルに何か残っていればそれを使う。
+            const local = localLoad();
+            return { json: local, source: local ? "local" : "none" };
+        }
+        catch (e) {
+            const local = localLoad();
+            return { json: local, source: local ? "local" : "none" };
+        }
+    }
+    const local = localLoad();
+    return { json: local, source: local ? "local" : "none" };
+}
+/** Firestoreへ保存を試み、ダメならlocalStorageへ保存。
+ *  戻り値: "firebase" | "local" | "error" */
+async function saveBooksJson(json) {
+    const fs = await waitForFirebase(2000);
+    if (fs) {
+        try {
+            await fs.save(json);
+            localSave(json); // 保険として常にローカルにも残す
+            return "firebase";
+        }
+        catch (e) {
+            return localSave(json) ? "local" : "error";
+        }
+    }
+    return localSave(json) ? "local" : "error";
+}
+
+/* ================= helpers ================= */
+const uid = () => Math.random().toString(36).slice(2, 10);
+/** 「今日」の日付を、UTC基準ではなく端末のローカル時間基準で取得する。
+ *  new Date().toISOString()はUTC基準のため、UTCより進んでいるタイムゾーン
+ *  (日本など)では、深夜〜朝の数時間、実際にはもう日付が変わっているのに
+ *  「まだ昨日」と誤判定してしまい、その間は今日のミッションが更新されない
+ *  不具合があった(2026/07/29 実際に発生・修正)。 */
+const todayStr = () => {
+    const d = new Date();
+    const localMidnightAsUtc = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+    return localMidnightAsUtc.toISOString().slice(0, 10);
+};
+const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
+/** 着手日から数えて今日が何日目か(1始まり)。複数箇所で同じ計算をしていたのを統一。 */
+const elapsedDayNumber = (startDate, todayKey) => Math.max(1, daysBetween(startDate, todayKey || todayStr()) + 1);
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+// koma.stage: 0=アタリ未 1=アタリ済/ラフ未 2=ラフ済/線画未 3=線画済/仕上げ未 4=仕上げ済
+const STAGE_LABELS = ["①アタリ", "②ラフ", "③下書き+線画", "④仕上げ"];
+const STAGE_SHORT = ["アタリ", "ラフ", "下書き+線画", "仕上げ"];
+const ATARI_HOURS = 0.25;
+const MISSION_OVER_BUDGET_MULTIPLIER = 1.5; // 1日の目安時間はあくまで目安。実際はこの倍率までは許容して積む。
+/** ミッションのタスク識別番号の形式バージョン。rowKeyの生成規則を変えた時はここも上げる。
+ *  古いバージョンの記録が残っていた場合、日付が今日のままでも強制的に今日の分を
+ *  作り直す(識別番号の形式が噛み合わず、タスク一覧が空に見えてしまう問題への対策)。 */
+/** ミッションの「組み立てロジック全体」のバージョン。タスクの識別番号の形式
+ *  (rowKey)を変えた時はもちろん、reorderForDayBias/buildMissionの並べ方の
+ *  ルールを変えた時も、必ずここを1つ上げること。これを上げ忘れると、
+ *  「その日のうちに既にミッションが作られたあとにロジックだけ直しても、
+ *  "今日は作成済み"として古いルールのまま放置される」という不具合が起きる
+ *  (2026/07/31 実際に発生・修正。日替わり難易度バイアスのロジックを
+ *  変更した際に上げ忘れていた)。 */
+const MISSION_SCHEMA_VERSION = 3;
+const DIFF_LABEL = { low: "低", mid: "中", high: "高" };
+const DIFF_CYCLE = { low: "mid", mid: "high", high: "low" };
+const DIFF_COLOR = { low: "#fff", mid: C.paperDeep, high: C.pink };
+const BOOK_SCHEMA_VERSION = 2;
+/** 本文コマの難易度別の工程時間(h)。低・中・高の3段階(大ゴマ概念は廃止)。 */
+const KOMA_HOURS = {
+    low: { rough: 2.0, senga: 1.5, shiage: 0.5 },
+    mid: { rough: 3.0, senga: 3.0, shiage: 1.0 },
+    high: { rough: 4.5, senga: 6.0, shiage: 1.5 },
+};
+function getKomaDifficulty(koma) {
+    if (koma.difficulty === "low" || koma.difficulty === "mid" || koma.difficulty === "high")
+        return koma.difficulty;
+    return koma.size === "oogoma" ? "high" : "mid"; // 旧データ後方互換
+}
+function cycleKomaDifficulty(koma) {
+    return { ...koma, difficulty: DIFF_CYCLE[getKomaDifficulty(koma)] };
+}
+function newKoma() {
+    return { id: uid(), difficulty: "mid", stage: 0, lastProgressDate: null };
+}
+function newGroup(count) {
+    return { id: uid(), komas: Array.from({ length: count }, newKoma) };
+}
+/** 表紙専用モデル。①アタリ〜⑤仕上げの5工程全てをスライダー式の自己申告%で管理する。 */
+const COVER_STAGES = ["①アタリ(構想)", "②ラフ", "③下書き〜線画", "④色塗り", "⑤仕上げ"];
+const COVER_HOURS = {
+    low: [6.0, 3.0, 6.0, 1.0, 3.0],
+    mid: [6.0, 6.0, 12.0, 3.0, 6.0],
+    high: [6.0, 6.0, 18.0, 6.0, 6.0],
+};
+const TITLE_LOGO_HOURS = { low: 1.0, mid: 3.0, high: 6.0 };
+function newCover() {
+    return {
+        difficulty: "mid",
+        stage: 0,
+        progressPct: 0,
+        lastProgressDate: null,
+        titleLogoDifficulty: "mid",
+        titleLogoDone: false,
+    };
+}
+function coverStageHours(cover, stageIndex) {
+    return COVER_HOURS[cover.difficulty][stageIndex];
+}
+function coverTotalHoursNeeded(cover) {
+    let total = 0;
+    for (let i = cover.stage; i < 5; i++) {
+        const stageTotal = coverStageHours(cover, i);
+        if (i === cover.stage)
+            total += stageTotal * (1 - (cover.progressPct || 0) / 100);
+        else
+            total += stageTotal;
+    }
+    if (!cover.titleLogoDone)
+        total += TITLE_LOGO_HOURS[cover.titleLogoDifficulty];
+    return total;
+}
+function coverSengaShiageBreakdown(cover) {
+    const hrs = COVER_HOURS[cover.difficulty];
+    let totalSenga = hrs[0] + hrs[1] + hrs[2];
+    let totalShiage = hrs[3] + hrs[4] + TITLE_LOGO_HOURS[cover.titleLogoDifficulty];
+    let completedSenga = 0, completedShiage = 0;
+    for (let i = 0; i < 5; i++) {
+        let doneFraction = 0;
+        if (cover.stage > i)
+            doneFraction = 1;
+        else if (cover.stage === i)
+            doneFraction = (cover.progressPct || 0) / 100;
+        const doneHours = hrs[i] * doneFraction;
+        if (i <= 2)
+            completedSenga += doneHours;
+        else
+            completedShiage += doneHours;
+    }
+    if (cover.titleLogoDone)
+        completedShiage += TITLE_LOGO_HOURS[cover.titleLogoDifficulty];
+    return { totalSenga, totalShiage, completedSenga, completedShiage };
+}
+/** 旧・表紙モデル({atariDone, komas:[...]})を新モデルへ移行する。 */
+function migrateCover(cover) {
+    if (!cover)
+        return newCover();
+    if (typeof cover.stage === "number" && cover.komas === undefined)
+        return cover; // すでに新モデル
+    const oldKoma = (cover.komas && cover.komas[0]) || { stage: 0, size: "normal" };
+    let stage;
+    if (!cover.atariDone)
+        stage = 0;
+    else if (oldKoma.stage >= 3)
+        stage = 5;
+    else
+        stage = oldKoma.stage + 1;
+    return {
+        difficulty: oldKoma.size === "oogoma" ? "high" : "mid",
+        stage,
+        progressPct: 0,
+        lastProgressDate: null,
+        titleLogoDifficulty: "mid",
+        titleLogoDone: false,
+    };
+}
+/** 本全体を新スキーマ(schemaVersion:2)へ移行する。
+ *  変更点: ①アタリがページ単位(group.atariDone)からコマ単位(koma.stage内)に統合され、
+ *  「大ゴマ/size」概念が廃止され「difficulty」に一本化された。
+ *  すでに移行済み(schemaVersion===2)ならそのまま返す(冪等)。 */
+function migrateBook(book) {
+    if (!book)
+        return book;
+    if (book.schemaVersion === BOOK_SCHEMA_VERSION)
+        return book;
+    const cover = migrateCover(book.cover);
+    const pages = (book.pages || []).map((p) => {
+        const wasAtariDone = !!p.atariDone;
+        const komas = (p.komas || []).map((k) => {
+            const difficulty = (k.difficulty === "low" || k.difficulty === "mid" || k.difficulty === "high")
+                ? k.difficulty
+                : (k.size === "oogoma" ? "high" : "mid");
+            const oldStage = typeof k.stage === "number" ? k.stage : 0; // 旧スケール: 0=ラフ未...3=仕上げ済
+            const newStage = wasAtariDone ? clamp(oldStage + 1, 0, 4) : 0;
+            return { id: k.id, difficulty, stage: newStage, lastProgressDate: k.lastProgressDate || null };
+        });
+        return { id: p.id, komas };
+    });
+    return { ...book, cover, pages, schemaVersion: BOOK_SCHEMA_VERSION };
+}
+function newBookSkeleton({ title, totalPages, startDate, deadline, dailyHours, avgKoma }) {
+    const interiorCount = Math.max(0, totalPages - 2);
+    return {
+        id: uid(),
+        title,
+        totalPages,
+        startDate,
+        deadline,
+        dailyHours,
+        bufferDays: 2,
+        avgKoma,
+        cover: newCover(),
+        pages: Array.from({ length: interiorCount }, () => newGroup(avgKoma)),
+        missionState: null,
+        schemaVersion: BOOK_SCHEMA_VERSION,
+    };
+}
+/** 本文一覧の表示ラベル。1番目は表2にあたるため+2して表示する(2箇所で重複していたのを統一)。 */
+const bodyPageLabel = (index) => `P${index + 2}`;
+/** 本文ページのみの一覧(表紙は別モデルなのでここには含まれない) */
+function groups(book) {
+    const list = [];
+    // 本文一覧の1番目は「表2」にあたる(表1は表紙ウィジェットが担当するため)。
+    // 表示ラベルは+1して、P2, P3, P4...という並びで表示する。
+    book.pages.forEach((p, i) => list.push({ id: p.id, label: bodyPageLabel(i), komas: p.komas }));
+    return list;
+}
+function komaHours(koma) {
+    return KOMA_HOURS[getKomaDifficulty(koma)];
+}
+function computeTotalHoursNeeded(cover, pages) {
+    let total = cover ? coverTotalHoursNeeded(cover) : 0;
+    (pages || []).forEach((g) => {
+        (g.komas || []).forEach((k) => {
+            const h = komaHours(k);
+            total += ATARI_HOURS + h.rough + h.senga + h.shiage;
+        });
+    });
+    return total;
+}
+function computeFeasibility(cover, pages, startDate, deadline, dailyHours) {
+    const needed = computeTotalHoursNeeded(cover, pages);
+    const days = Math.max(1, daysBetween(startDate, deadline));
+    const available = days * (dailyHours || 0);
+    const shortfall = needed - available;
+    return { ok: shortfall <= 0, needed, available, shortfall, days };
+}
+/** ページ内の全コマの③線画が終わっているか(④仕上げに進めるための条件)。
+ *  仕上げ作業はページ全体に関わるため、これはコマ単位管理になった後も維持する。 */
+function isGroupUnlocked(group) {
+    if (group.komas.length === 0)
+        return true;
+    return group.komas.every((k) => k.stage >= 3);
+}
+function computeStats(book) {
+    var _a;
+    const gs = groups(book);
+    let totalSengaHours = 0, completedSengaHours = 0, totalShiageHours = 0, completedShiageHours = 0;
+    gs.forEach((g) => {
+        g.komas.forEach((k) => {
+            const h = komaHours(k);
+            totalSengaHours += ATARI_HOURS + h.rough + h.senga;
+            totalShiageHours += h.shiage;
+            if (k.stage >= 1)
+                completedSengaHours += ATARI_HOURS;
+            if (k.stage >= 2)
+                completedSengaHours += h.rough;
+            if (k.stage >= 3)
+                completedSengaHours += h.senga;
+            if (k.stage >= 4)
+                completedShiageHours += h.shiage;
+        });
+    });
+    if (book.cover) {
+        const cb = coverSengaShiageBreakdown(book.cover);
+        totalSengaHours += cb.totalSenga;
+        completedSengaHours += cb.completedSenga;
+        totalShiageHours += cb.totalShiage;
+        completedShiageHours += cb.completedShiage;
+    }
+    const actualSenga = totalSengaHours > 0 ? (completedSengaHours / totalSengaHours) * 100 : 100;
+    const actualShiage = totalShiageHours > 0 ? (completedShiageHours / totalShiageHours) * 100 : 100;
+    const dailyHours = book.dailyHours || 3;
+    const bufferDays = (_a = book.bufferDays) !== null && _a !== void 0 ? _a : 2;
+    const start = book.startDate;
+    const deadline = book.deadline;
+    const totalDays = Math.max(1, daysBetween(start, deadline));
+    const shiageDays = Math.ceil(totalShiageHours / dailyHours);
+    let sengaTargetDate = new Date(deadline);
+    sengaTargetDate.setDate(sengaTargetDate.getDate() - shiageDays - bufferDays);
+    sengaTargetDate = sengaTargetDate.toISOString().slice(0, 10);
+    const daysToSengaTarget = Math.max(1, daysBetween(start, sengaTargetDate));
+    const elapsed = Math.max(0, daysBetween(start, todayStr()));
+    const requiredSenga = clamp((elapsed / daysToSengaTarget) * 100, 0, 100);
+    const requiredShiage = clamp((elapsed / totalDays) * 100, 0, 100);
+    const dangerOf = (actual, required) => {
+        if (actual >= required)
+            return "green";
+        if (required - actual <= 15)
+            return "yellow";
+        return "red";
+    };
+    const sengaDanger = dangerOf(actualSenga, requiredSenga);
+    const shiageDanger = dangerOf(actualShiage, requiredShiage);
+    const overallDanger = sengaDanger === "red" || shiageDanger === "red" ? "red" : sengaDanger === "yellow" || shiageDanger === "yellow" ? "yellow" : "green";
+    let suggestion = null;
+    if (sengaDanger !== "green") {
+        const shortfallHours = ((requiredSenga - actualSenga) / 100) * totalSengaHours;
+        const daysBehind = Math.max(1, Math.ceil(shortfallHours / dailyHours));
+        suggestion = `線画ラインが必達ペースより約${Math.max(0.5, shortfallHours).toFixed(1)}h(約${daysBehind}日分)遅れています。難易度の高いコマを減らす、またはページ数の削減を検討してください。`;
+    }
+    else if (shiageDanger !== "green") {
+        suggestion = `仕上げが必達ペースより遅れています。線画が終わっているページから優先して仕上げに着手してください。`;
+    }
+    return {
+        actualSenga,
+        actualShiage,
+        requiredSenga,
+        requiredShiage,
+        sengaDanger,
+        shiageDanger,
+        overallDanger,
+        suggestion,
+        sengaTargetDate,
+        totalSengaHours,
+        totalShiageHours,
+        completedSengaHours,
+        completedShiageHours,
+    };
+}
+function computeRemainingFeasibility(book, stats) {
+    const remainingHours = (stats.totalSengaHours - stats.completedSengaHours) + (stats.totalShiageHours - stats.completedShiageHours);
+    const daysLeft = Math.max(0, daysBetween(todayStr(), book.deadline));
+    const availableHours = daysLeft * (book.dailyHours || 0);
+    const shortfall = remainingHours - availableHours;
+    return { ok: shortfall <= 0, remainingHours, availableHours, shortfall, daysLeft };
+}
+/** コマの次にやるべき工程を返す。stage0=アタリ, 1=ラフ, 2=線画, 3=仕上げ(要unlock), 4=完了。 */
+function getNextTask(koma, unlocked) {
+    const h = komaHours(koma);
+    if (koma.stage === 0)
+        return { key: "atari", label: STAGE_LABELS[0], hours: ATARI_HOURS };
+    if (koma.stage === 1)
+        return { key: "rough", label: STAGE_LABELS[1], hours: h.rough };
+    if (koma.stage === 2)
+        return { key: "senga", label: STAGE_LABELS[2], hours: h.senga };
+    if (koma.stage === 3 && unlocked)
+        return { key: "shiage", label: STAGE_LABELS[3], hours: h.shiage };
+    return null;
+}
+/** ページ内の全コマを対象に、それぞれ独立して次のタスクを1行ずつ積む
+ *  (①アタリもコマ単位になったので、同じページ内でもコマごとにバラバラに進められる)。 */
+function buildRows(book) {
+    const gs = groups(book);
+    const rows = [];
+    gs.forEach((g) => {
+        if (g.komas.length === 0)
+            return; // 白紙ページ、タスクなし
+        const unlocked = isGroupUnlocked(g);
+        g.komas.forEach((k) => {
+            const task = getNextTask(k, unlocked);
+            if (task)
+                rows.push({ groupId: g.id, label: g.label, koma: k, task });
+        });
+    });
+    return rows;
+}
+/** タスクの識別番号。コマIDだけでなく「今どの工程か(task.key)」も含める。
+ *  これが無いと、①アタリ完了→②ラフ完了、と工程が進むたびに同じ識別番号が
+ *  使い回されてしまい、「戻す」操作で全く別工程の完了記録まで巻き添えで
+ *  消えてしまう不具合が起きる(2026/07/28 実際に発生・修正)。 */
+const rowKey = (row) => `koma-${row.koma.id}-${row.task.key}`;
+/** confetti演出の対象判定だけに使う、コマ単位のゆるい識別子。
+ *  rowKeyとは別物: 完了直後は同じコマの「次の工程」の行にconfettiを重ねて
+ *  表示したいので、工程が変わっても一致し続けるコマID単体で比較する。 */
+const rowKomaId = (row) => row.koma.id;
+const rowHours = (row) => row.task.hours;
+const rowTitle = (row) => row.task.label;
+function targetDifficultyForDay(book) {
+    const dayNumber = elapsedDayNumber(book.startDate, todayStr());
+    return dayNumber % 2 === 1 ? "low" : "mid";
+}
+/** その日の並び順を組み立てる。
+ *  低難易度・中難易度を回避し続ける悪癖対策として、必ず1日1個は高難易度を
+ *  ミッションに含めつつ、かつ「その日の優先難易度(低/中)」を露払いとして
+ *  1個だけ使ったら、それ以上は温存する(浪費して後半に低or中が枯渇するのを防ぐ)。
+ *
+ *  並び順:
+ *  ① その日の優先難易度(primary)を1個だけ(露払い)
+ *  ② 高難易度を1個だけ(必ず1日1回、悪癖対策の核心)
+ *  ③ 残りは「もう片方の難易度(secondary)」を優先して埋める(primaryを温存)
+ *  ④ secondaryが尽きたら、そこで初めてprimaryも追加で使う
+ *     (「どうしても低の工程をクリアしなきゃいけない局面」になったら使う、の意図)
+ *  ⑤ 1日2個目以降の高難易度は、あくまで余りとして最後に回す
+ */
+function reorderForDayBias(rows, primaryDiff) {
+    const secondaryDiff = primaryDiff === "low" ? "mid" : "low";
+    const opener = [];
+    const forcedHigh = [];
+    const secondaryBucket = [];
+    const primaryBucket = [];
+    const extraHighBucket = [];
+    rows.forEach((r) => {
+        const diff = getKomaDifficulty(r.koma);
+        if (opener.length === 0 && diff === primaryDiff) {
+            opener.push(r);
+        }
+        else if (forcedHigh.length === 0 && diff === "high") {
+            forcedHigh.push(r);
+        }
+        else if (diff === secondaryDiff) {
+            secondaryBucket.push(r);
+        }
+        else if (diff === primaryDiff) {
+            primaryBucket.push(r);
+        }
+        else {
+            extraHighBucket.push(r);
+        }
+    });
+    return [...opener, ...forcedHigh, ...secondaryBucket, ...primaryBucket, ...extraHighBucket];
+}
+/** 1日の目安時間(dailyHours)を超えるタスクに当たっても、そこで探索を止めない。
+ *  スキップして、その先に収まる別のタスクがあれば積み続ける。
+ *  「目安はあくまで目安」という方針により、実際の上限は目安の1.5倍まで許容する
+ *  (これを超える極端に重いタスクだけをその日はスキップし、翌日以降に回す)。
+ *  先頭guaranteedCount件(=露払い1個+高難易度1個)は、それすら超えていても必ず入れる
+ *  (ミッションが空にならない保険であり、高難易度回避の悪癖対策の核心でもある)。 */
+function buildMission(rows, dailyHours, dateKey, guaranteedCount) {
+    const guaranteed = guaranteedCount || 1;
+    const items = [];
+    let cum = 0;
+    const budget = dailyHours || 3;
+    const hardCap = budget * MISSION_OVER_BUDGET_MULTIPLIER;
+    for (const row of rows) {
+        const hours = rowHours(row);
+        if (items.length < guaranteed) {
+            items.push({ key: rowKey(row), hours, label: row.label, title: rowTitle(row) });
+            cum += hours;
+            continue;
+        }
+        if (cum + hours > hardCap)
+            continue; // このタスクは今日はスキップ、後日ぶんに残る。探索は続ける
+        items.push({ key: rowKey(row), hours, label: row.label, title: rowTitle(row) });
+        cum += hours;
+    }
+    return { date: dateKey, schemaVersion: MISSION_SCHEMA_VERSION, items, doneKeys: [] };
+}
+/* ================= small UI atoms ================= */
+function DangerDot({ level }) {
+    const color = level === "red" ? C.red : level === "yellow" ? C.amber : C.mint;
+    return React.createElement("span", { style: { display: "inline-block", width: 10, height: 10, borderRadius: 999, background: color, border: `1.5px solid ${C.ink}` } });
+}
+function PanelButton({ children, onClick, style, rotate = 0 }) {
+    return (React.createElement("button", { onClick: onClick, className: "px-4 py-2 font-bold", style: {
+            fontFamily: FONT_DISPLAY,
+            background: C.paper,
+            border: `2.5px solid ${C.ink}`,
+            borderRadius: 10,
+            boxShadow: `3px 3px 0 ${C.ink}`,
+            transform: `rotate(${rotate}deg)`,
+            ...style,
+        } }, children));
+}
+function Bar({ actual, required, color }) {
+    return (React.createElement("div", { style: { position: "relative", height: 22, background: "#fff", border: `2px solid ${C.ink}`, borderRadius: 6, overflow: "hidden" } },
+        React.createElement("div", { style: { position: "absolute", left: 0, top: 0, bottom: 0, width: `${actual}%`, background: color, transition: "width 0.4s" } }),
+        React.createElement("div", { style: { position: "absolute", left: `${required}%`, top: -3, bottom: -3, width: 3, background: C.ink }, title: "必達ライン" })));
+}
+function Field({ label, children }) {
+    return (React.createElement("div", null,
+        React.createElement("label", { style: { color: C.inkSoft, fontSize: 13, fontWeight: 700 } }, label),
+        React.createElement("div", { className: "mt-1" }, children)));
+}
+function CompletionBurst() {
+    const colors = [C.pink, C.mint, C.amber, C.red];
+    return (React.createElement("div", { style: { position: "absolute", inset: 0, pointerEvents: "none" } },
+        React.createElement("div", { className: "stamp-pop", style: {
+                position: "absolute", top: "50%", left: "50%", marginTop: -28, marginLeft: -28,
+                width: 56, height: 56, borderRadius: 999, border: `3px solid ${C.red}`, color: C.red,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontFamily: FONT_DISPLAY, fontSize: 16, background: "rgba(255,255,255,0.85)", zIndex: 5,
+            } }, "済"),
+        Array.from({ length: 10 }).map((_, i) => (React.createElement("div", { key: i, className: "confetti-piece", style: { position: "absolute", top: "40%", left: `${10 + i * 8}%`, width: 6, height: 6, background: colors[i % colors.length], animationDelay: `${i * 0.03}s` } })))));
+}
+/** データの保存状況を表示する小さなバッジ(Firebase接続への不安を解消するため)。 */
+function SyncBadge({ status }) {
+    if (status === "idle")
+        return null;
+    const map = {
+        saving: { icon: null, label: "保存中…", color: C.inkSoft },
+        firebase: { icon: CloudCheck, label: "クラウドに保存済み", color: C.mint },
+        local: { icon: CloudOff, label: "端末に保存(クラウド未接続)", color: C.amber },
+        error: { icon: CloudOff, label: "保存に失敗しました", color: C.red },
+    };
+    const cfg = map[status];
+    if (!cfg)
+        return null;
+    return (React.createElement("div", { className: "flex items-center gap-1", style: { fontSize: 11, color: cfg.color } },
+        cfg.icon && React.createElement(cfg.icon, { size: 13, color: cfg.color }),
+        cfg.label));
+}
+/* ================= Group (page) editor row ================= */
+function GroupEditRow({ label, group, onSetCount, onCycleDifficulty, onDelete, deletable, onMoveUp, onMoveDown, canMoveUp, canMoveDown }) {
+    const [editing, setEditing] = useState(false);
+    const [expand, setExpand] = useState(false);
+    const hasHigh = group.komas.some((k) => getKomaDifficulty(k) === "high");
+    const hasProgress = group.komas.some((k) => k.stage > 0);
+    return (React.createElement("div", { className: "p-2 rounded-lg", style: { border: `2px solid ${C.ink}`, background: "#fff" } },
+        React.createElement("div", { className: "flex items-center justify-between gap-2" },
+            React.createElement("button", { onClick: () => setExpand((v) => !v), className: "flex items-center gap-2 flex-1 text-left" },
+                React.createElement("span", { style: { fontWeight: 800 } }, label),
+                React.createElement("span", { style: { color: C.inkSoft, fontSize: 13 } },
+                    group.komas.length,
+                    "コマ"),
+                hasHigh && React.createElement("span", { style: { fontSize: 11, color: C.pinkDeep } }, "高難易度あり")),
+            React.createElement("div", { className: "flex items-center gap-1" },
+                onMoveUp && (React.createElement("button", { onClick: onMoveUp, disabled: !canMoveUp, title: "上へ移動", style: { opacity: canMoveUp ? 1 : 0.25, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center" } },
+                    React.createElement(ChevronUp, { size: 16, color: C.inkSoft }))),
+                onMoveDown && (React.createElement("button", { onClick: onMoveDown, disabled: !canMoveDown, title: "下へ移動", style: { opacity: canMoveDown ? 1 : 0.25, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center" } },
+                    React.createElement(ChevronDown, { size: 16, color: C.inkSoft })))),
+            editing ? (React.createElement("input", { type: "number", min: 0, autoFocus: true, defaultValue: group.komas.length, onFocus: (e) => e.target.select(), onBlur: (e) => { onSetCount(Math.max(0, Number(e.target.value))); setEditing(false); }, className: "w-16 p-1 rounded", style: { border: `2px solid ${C.ink}` } })) : (React.createElement("button", { onClick: () => setEditing(true) },
+                React.createElement(Pencil, { size: 16, color: C.inkSoft }))),
+            deletable && (React.createElement("button", { onClick: () => { if (!hasProgress || window.confirm(`${label}は作業途中です。本当に削除しますか？`))
+                    onDelete(); } },
+                React.createElement(Trash2, { size: 15, color: C.inkSoft })))),
+        expand && (React.createElement("div", { className: "flex flex-wrap gap-1.5 mt-2" },
+            group.komas.length === 0 && React.createElement("span", { style: { fontSize: 12, color: C.inkSoft } }, "0コマ(白紙扱い・タスクなし)"),
+            group.komas.map((k, i) => {
+                const diff = getKomaDifficulty(k);
+                return (React.createElement("button", { key: k.id, onClick: () => onCycleDifficulty(k.id), className: "px-2 py-1 rounded", style: { fontSize: 12, border: `1.5px solid ${C.ink}`, background: DIFF_COLOR[diff], color: diff === "high" ? "#fff" : C.ink } },
+                    "コマ",
+                    i + 1,
+                    " ",
+                    DIFF_LABEL[diff]));
+            })))));
+}
+function GroupListEditor({ pages, onChangePages, avgKoma }) {
+    const setPageCount = (pid, n) => {
+        onChangePages(pages.map((p) => {
+            if (p.id !== pid)
+                return p;
+            const komas = [...p.komas];
+            while (komas.length < n)
+                komas.push(newKoma());
+            while (komas.length > n)
+                komas.pop();
+            return { ...p, komas };
+        }));
+    };
+    const cyclePageKomaDifficulty = (pid, kid) => {
+        onChangePages(pages.map((p) => (p.id !== pid ? p : { ...p, komas: p.komas.map((k) => (k.id === kid ? cycleKomaDifficulty(k) : k)) })));
+    };
+    const deletePage = (pid) => onChangePages(pages.filter((p) => p.id !== pid));
+    const addPage = () => onChangePages([...pages, newGroup(avgKoma !== null && avgKoma !== void 0 ? avgKoma : 5)]);
+    /** ページを1つ上/下に入れ替える。表紙(表1)ぶんズラした表示ラベルは、
+     *  並び順から自動計算されるものなので、ここでは配列の順番だけ入れ替えれば
+     *  ラベルは自然に正しく再計算される。 */
+    const swapPages = (index, direction) => {
+        const target = index + direction;
+        if (target < 0 || target >= pages.length)
+            return;
+        const next = [...pages];
+        [next[index], next[target]] = [next[target], next[index]];
+        onChangePages(next);
+    };
+    return (React.createElement("div", { className: "space-y-2" },
+        pages.map((p, i) => (React.createElement(GroupEditRow, { key: p.id, label: bodyPageLabel(i), group: p, onSetCount: (n) => setPageCount(p.id, n), onCycleDifficulty: (kid) => cyclePageKomaDifficulty(p.id, kid), onDelete: () => deletePage(p.id), deletable: true, onMoveUp: () => swapPages(i, -1), onMoveDown: () => swapPages(i, 1), canMoveUp: i > 0, canMoveDown: i < pages.length - 1 }))),
+        React.createElement(PanelButton, { onClick: addPage, style: { background: "#fff", color: C.ink, width: "100%" } },
+            React.createElement("span", { className: "flex items-center justify-center gap-1" },
+                React.createElement(Plus, { size: 16 }),
+                " ページを追加"))));
+}
+function CoverEditRow({ cover, onChange }) {
+    const cycle = (field) => onChange({ ...cover, [field]: DIFF_CYCLE[cover[field] || "mid"] });
+    const diffButton = (field, label) => {
+        const diff = cover[field] || "mid";
+        return React.createElement("div", { className: "flex items-center justify-between" },
+            React.createElement("span", { style: { fontSize: 13, color: C.inkSoft } }, label),
+            React.createElement("button", { onClick: () => cycle(field), className: "px-3 py-1 rounded", style: { fontSize: 12, border: `1.5px solid ${C.ink}`, background: DIFF_COLOR[diff], color: diff === "high" ? "#fff" : C.ink } }, DIFF_LABEL[diff]));
+    };
+    return (React.createElement("div", { className: "p-2 rounded-lg space-y-2", style: { border: `2px solid ${C.ink}`, background: "#fff" } },
+        React.createElement("div", { style: { fontWeight: 800 } }, "表紙(表1・表4)"),
+        diffButton("difficulty", "表紙の難易度"),
+        diffButton("titleLogoDifficulty", "タイトルロゴの難易度")));
+}
+/* ================= Registration Wizard ================= */
+function RegisterWizard({ onCancel, onSave }) {
+    const [step, setStep] = useState(1);
+    const [title, setTitle] = useState("");
+    const [totalPages, setTotalPages] = useState(20);
+    const [startDate, setStartDate] = useState(todayStr());
+    const [deadline, setDeadline] = useState("");
+    const [dailyHours, setDailyHours] = useState(3);
+    const [avgKoma, setAvgKoma] = useState(5);
+    const [book, setBook] = useState(null);
+    const [error, setError] = useState("");
+    const goStep2 = () => {
+        if (!title.trim())
+            return setError("タイトルを入力してください");
+        if (!totalPages || totalPages < 1)
+            return setError("総ページ数を入力してください");
+        if (!startDate)
+            return setError("着手開始日を入力してください");
+        if (!deadline)
+            return setError("締切日を入力してください");
+        setError("");
+        setStep(2);
+    };
+    const genPages = () => {
+        setBook(newBookSkeleton({ title, totalPages, startDate, deadline, dailyHours, avgKoma }));
+        setError("");
+        setStep(3);
+    };
+    const trySave = () => {
+        if (!book)
+            return setError("先にページ構成を作成してください");
+        onSave(book);
+    };
+    return (React.createElement("div", { className: "min-h-full p-4", style: { background: C.paper } },
+        React.createElement("div", { className: "flex items-center gap-2 mb-4" },
+            React.createElement("button", { onClick: onCancel },
+                React.createElement(ChevronLeft, { color: C.ink })),
+            React.createElement("h2", { className: "font-display text-lg", style: { color: C.ink } },
+                "本を登録 (",
+                step,
+                "/3)")),
+        step === 1 && (React.createElement("div", { className: "space-y-4" },
+            React.createElement(Field, { label: "タイトル" },
+                React.createElement("input", { value: title, onChange: (e) => setTitle(e.target.value), className: "w-full p-2 rounded-lg", style: inputStyle, placeholder: "タイトルを入力" })),
+            React.createElement(Field, { label: "総ページ数(表紙+裏表紙を含む)" },
+                React.createElement("input", { type: "number", value: totalPages, onFocus: (e) => e.target.select(), onChange: (e) => setTotalPages(Number(e.target.value)), className: "w-full p-2 rounded-lg", style: inputStyle })),
+            React.createElement(Field, { label: "着手開始日" },
+                React.createElement("input", { type: "date", value: startDate, onChange: (e) => setStartDate(e.target.value), className: "w-full p-2 rounded-lg", style: inputStyle })),
+            React.createElement(Field, { label: "締切日" },
+                React.createElement("input", { type: "date", value: deadline, onChange: (e) => setDeadline(e.target.value), className: "w-full p-2 rounded-lg", style: inputStyle })),
+            React.createElement(Field, { label: "1日に使える作業時間の目安(h)" },
+                React.createElement("input", { type: "number", value: dailyHours, onFocus: (e) => e.target.select(), onChange: (e) => setDailyHours(Number(e.target.value)), className: "w-full p-2 rounded-lg", style: inputStyle })),
+            error && React.createElement("div", { style: { color: C.red, fontSize: 13, fontWeight: 700 } },
+                "⚠ ", error),
+            React.createElement(PanelButton, { onClick: goStep2, style: { background: C.pink, color: "#fff", width: "100%" } }, "次へ →"))),
+        step === 2 && (React.createElement("div", { className: "space-y-4" },
+            React.createElement("p", { style: { color: C.inkSoft, fontSize: 14 } }, "本文ページに同じコマ数を割り当てます(表紙は別枠、あとで個別ページごと0含め修正可)。"),
+            React.createElement(Field, { label: "1ページあたりの平均コマ数" },
+                React.createElement("input", { type: "number", min: 0, value: avgKoma, onFocus: (e) => e.target.select(), onChange: (e) => setAvgKoma(Number(e.target.value)), className: "w-full p-2 rounded-lg", style: inputStyle })),
+            React.createElement(PanelButton, { onClick: genPages, style: { background: C.pink, color: "#fff", width: "100%" } }, "この数で本文ページを作成"))),
+        step === 3 && book && (React.createElement("div", { className: "space-y-3" },
+            React.createElement("p", { style: { color: C.inkSoft, fontSize: 14 } }, "表紙の難易度や、平均と違うページだけ✏️で修正。コマをタップで難易度(低・中・高)切替。0コマも可(白紙ページ用)。"),
+            React.createElement("div", { className: "max-h-[55vh] overflow-y-auto pr-1" },
+                React.createElement("div", { className: "space-y-2" },
+                    React.createElement(CoverEditRow, { cover: book.cover, onChange: (cover) => setBook({ ...book, cover }) }),
+                    React.createElement(GroupListEditor, { pages: book.pages, avgKoma: avgKoma, onChangePages: (pages) => setBook({ ...book, pages }) }))),
+            (() => {
+                const feas = computeFeasibility(book.cover, book.pages, book.startDate, book.deadline, book.dailyHours);
+                return !feas.ok && React.createElement("div", { style: { border: `2.5px solid ${C.red}`, background: "#FFF0EF", borderRadius: 10, padding: 12, display: "flex", gap: 8 } },
+                    React.createElement(AlertTriangle, { color: C.red, size: 20, style: { flexShrink: 0, marginTop: 2 } }),
+                    React.createElement("div", { style: { fontSize: 13, color: C.ink } }, `この設定では時間が足りません。必要 ${feas.needed.toFixed(1)}h に対して、残り${feas.days}日 × 1日${book.dailyHours}h = ${feas.available.toFixed(1)}h しか確保できていません(不足 ${feas.shortfall.toFixed(1)}h)。1日の作業時間・締切日・ページ数やコマ数を見直してください。`));
+            })(),
+            error && React.createElement("div", { style: { color: C.red, fontSize: 13, fontWeight: 700 } },
+                "⚠ ", error),
+            React.createElement(PanelButton, { onClick: trySave, style: { background: C.mint, color: "#fff", width: "100%" } }, "登録する"),
+            React.createElement("div", { className: "bottom-safe-spacer" })))));
+}
+/* ================= Edit existing book ================= */
+function EditBookScreen({ book, onCancel, onSave }) {
+    const [title, setTitle] = useState(book.title);
+    const [startDate, setStartDate] = useState(book.startDate);
+    const [deadline, setDeadline] = useState(book.deadline);
+    const [dailyHours, setDailyHours] = useState(book.dailyHours);
+    const [cover, setCover] = useState(book.cover);
+    const [pages, setPages] = useState(book.pages);
+    const feas = computeFeasibility(cover, pages, startDate, deadline, dailyHours);
+    return (React.createElement("div", { className: "min-h-full p-4", style: { background: C.paper } },
+        React.createElement("div", { className: "flex items-center gap-2 mb-4" },
+            React.createElement("button", { onClick: onCancel },
+                React.createElement(X, { color: C.ink })),
+            React.createElement("h2", { className: "font-display text-lg", style: { color: C.ink } }, "本を編集")),
+        React.createElement("div", { className: "space-y-4" },
+            React.createElement(Field, { label: "タイトル" },
+                React.createElement("input", { value: title, onChange: (e) => setTitle(e.target.value), className: "w-full p-2 rounded-lg", style: inputStyle })),
+            React.createElement("div", { className: "grid grid-cols-2 gap-2" },
+                React.createElement(Field, { label: "着手開始日" },
+                    React.createElement("input", { type: "date", value: startDate, onChange: (e) => setStartDate(e.target.value), className: "w-full p-2 rounded-lg", style: inputStyle })),
+                React.createElement(Field, { label: "締切日" },
+                    React.createElement("input", { type: "date", value: deadline, onChange: (e) => setDeadline(e.target.value), className: "w-full p-2 rounded-lg", style: inputStyle }))),
+            React.createElement(Field, { label: "1日に使える作業時間の目安(h)" },
+                React.createElement("input", { type: "number", value: dailyHours, onFocus: (e) => e.target.select(), onChange: (e) => setDailyHours(Number(e.target.value)), className: "w-full p-2 rounded-lg", style: inputStyle })),
+            React.createElement("div", null,
+                React.createElement("div", { style: { fontFamily: FONT_DISPLAY, fontSize: 13, color: C.ink, marginBottom: 6 } }, "ページ構成"),
+                React.createElement("div", { className: "max-h-[45vh] overflow-y-auto pr-1" },
+                    React.createElement("div", { className: "space-y-2" },
+                        React.createElement(CoverEditRow, { cover: cover, onChange: setCover }),
+                        React.createElement(GroupListEditor, { pages: pages, onChangePages: setPages, avgKoma: book.avgKoma })))),
+            !feas.ok && React.createElement("div", { style: { border: `2.5px solid ${C.red}`, background: "#FFF0EF", borderRadius: 10, padding: 12, display: "flex", gap: 8 } },
+                React.createElement(AlertTriangle, { color: C.red, size: 20, style: { flexShrink: 0, marginTop: 2 } }),
+                React.createElement("div", { style: { fontSize: 13, color: C.ink } }, `この設定では時間が足りません。必要 ${feas.needed.toFixed(1)}h に対して、残り${feas.days}日 × 1日${dailyHours}h = ${feas.available.toFixed(1)}h しか確保できていません(不足 ${feas.shortfall.toFixed(1)}h)。1日の作業時間・締切日・ページ数やコマ数を見直してください。`)),
+            React.createElement(PanelButton, { onClick: () => onSave({ ...book, title, startDate, deadline, dailyHours, cover, pages, totalPages: pages.length + 2 }), style: { background: C.mint, color: "#fff", width: "100%" } }, "保存する"),
+            React.createElement("div", { className: "bottom-safe-spacer" }))));
+}
+/* ================= Task row card ================= */
+function TaskRowCard({ row, onComplete, onResetKoma, burstActive, faded }) {
+    const diff = getKomaDifficulty(row.koma);
+    const title = rowTitle(row);
+    const hours = rowHours(row);
+    const sub = `${row.label} コマ ・目安 ${hours < 1 ? Math.round(hours * 60) + "分" : hours.toFixed(1) + "h"}`;
+    const canReset = row.koma.stage > 0; // ①アタリ未着手の状態より前には戻せない
+    return (React.createElement("div", { style: {
+            position: "relative", border: `3px solid ${C.ink}`, borderRadius: 12,
+            background: diff === "high" ? C.paperDeep : "#fff", boxShadow: `4px 4px 0 ${C.ink}`,
+            padding: "12px 14px", display: "flex", alignItems: "center", justifyContent: "space-between",
+            opacity: faded ? 0.65 : 1,
+        } },
+        React.createElement("div", null,
+            React.createElement("div", { style: { fontFamily: FONT_DISPLAY, fontSize: 14, color: C.ink } },
+                title,
+                " ",
+                diff !== "mid" && React.createElement("span", { style: { color: C.pinkDeep, fontSize: 11 } }, `難易度:${DIFF_LABEL[diff]}`)),
+            React.createElement("div", { style: { fontSize: 12, color: C.inkSoft, marginTop: 2 } }, sub)),
+        React.createElement("div", { className: "flex items-center gap-2 flex-shrink-0" },
+            canReset && (React.createElement("button", { onClick: () => onResetKoma(row.koma.stage - 1), title: "1工程戻す", style: { width: 32, height: 32, borderRadius: 999, border: `2px solid ${C.inkSoft}`, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center" } },
+                React.createElement(RotateCcw, { size: 15, color: C.inkSoft }))),
+            React.createElement("button", { onClick: onComplete, style: { width: 40, height: 40, borderRadius: 999, border: `2.5px solid ${C.ink}`, background: C.mint, display: "flex", alignItems: "center", justifyContent: "center" } },
+                React.createElement(Check, { color: "#fff", size: 20 }))),
+        burstActive && React.createElement(CompletionBurst, null)));
+}
+function RowList({ rows, burstId, faded, onCompleteRow, onResetRow }) {
+    let lastLabel = null;
+    return (React.createElement("div", { className: "space-y-2" }, rows.map((row) => {
+        const key = rowKey(row);
+        const showHeader = row.label !== lastLabel;
+        lastLabel = row.label;
+        return (React.createElement(React.Fragment, { key: key },
+            showHeader && React.createElement("div", { style: { fontFamily: FONT_DISPLAY, color: C.inkSoft, fontSize: 12, marginTop: 4 } }, row.label),
+            React.createElement(TaskRowCard, { row: row, faded: faded, burstActive: burstId === rowKomaId(row), onComplete: () => onCompleteRow(row), onResetKoma: (targetStage) => onResetRow(row, targetStage) })));
+    })));
+}
+/** 表紙専用の常時固定カード。①アタリ〜⑤仕上げの全工程をスライダーで自己申告%管理する。
+ *  今日のタスクカウントには含めない。スライダーが100%に達すると自動で次の工程へ進む。 */
+function CoverProgressCard({ cover, onUpdateCover }) {
+    const finished = cover.stage >= 5;
+    const titleLogoLeft = !cover.titleLogoDone;
+    if (finished && !titleLogoLeft)
+        return null;
+    const stageHours = !finished ? coverStageHours(cover, cover.stage) : 0;
+    // スライダーの見た目上の値はローカルstateで管理し、ドラッグ中は自由に動かせるようにする。
+    // 実際の保存・工程進行の判定は、指を離した瞬間(onMouseUp/onTouchEnd)にのみ行う。
+    // これをしないと、指を勢いよく滑らせた時に途中経過のイベントが何度も発生し、
+    // その都度「100%到達」判定が走ってしまい、一瞬で複数工程が進んでしまう不具合があった
+    // (2026/07/30 実際に発生・修正)。
+    const [localPct, setLocalPct] = useState(cover.progressPct || 0);
+    useEffect(() => { setLocalPct(cover.progressPct || 0); }, [cover.progressPct, cover.stage]);
+    const commitSlider = () => {
+        const today = todayStr();
+        if (localPct >= 100) {
+            onUpdateCover({ ...cover, stage: cover.stage + 1, progressPct: 0, lastProgressDate: today });
+        }
+        else {
+            onUpdateCover({ ...cover, progressPct: localPct, lastProgressDate: today });
+        }
+    };
+    const toggleTitleLogo = () => onUpdateCover({ ...cover, titleLogoDone: !cover.titleLogoDone });
+    /** 表紙の工程を1つ戻す(やり直し・ボツ)。戻った先の工程は必ず0%から再開する
+     *  (戻る前に何%まで進んでいたかは記録していないため)。①アタリより前には戻せない。 */
+    const revertStage = () => {
+        if (cover.stage <= 0)
+            return;
+        onUpdateCover({ ...cover, stage: cover.stage - 1, progressPct: 0, lastProgressDate: todayStr() });
+    };
+    return (React.createElement("div", { style: { border: `3px solid ${C.ink}`, borderRadius: 12, background: C.paperDeep, boxShadow: `4px 4px 0 ${C.ink}`, padding: "12px 14px" } },
+        React.createElement("div", { className: "flex items-center justify-between" },
+            React.createElement("div", { style: { fontFamily: FONT_DISPLAY, fontSize: 14, color: C.ink } },
+                "🎨 表紙",
+                !finished && ` ${COVER_STAGES[cover.stage]}`),
+            React.createElement("div", { className: "flex items-center gap-2" },
+                !finished && React.createElement("div", { style: { fontSize: 11, color: C.inkSoft } }, `目安${stageHours.toFixed(1)}h`),
+                cover.stage > 0 && (React.createElement("button", { onClick: revertStage, title: "1工程戻す", style: { width: 28, height: 28, borderRadius: 999, border: `2px solid ${C.inkSoft}`, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } },
+                    React.createElement(RotateCcw, { size: 14, color: C.inkSoft }))))),
+        !finished && (React.createElement("div", { className: "mt-2" },
+            React.createElement("input", { type: "range", min: 0, max: 100, value: localPct, onChange: (e) => setLocalPct(Number(e.target.value)), onMouseUp: commitSlider, onTouchEnd: commitSlider, className: "w-full" }),
+            React.createElement("div", { style: { fontSize: 11, color: C.inkSoft, textAlign: "right" } }, `${localPct}%`))),
+        titleLogoLeft && (React.createElement("button", { onClick: toggleTitleLogo, className: "mt-2 w-full py-2 rounded-lg", style: { border: `2px solid ${C.ink}`, background: "#fff", fontFamily: FONT_DISPLAY, fontSize: 12, color: C.ink } }, "✎ タイトルロゴ 未完了(タップで完了)"))));
+}
+/* ================= Debug Panel ================= */
+function DebugPanel({ book, onClose }) {
+    const missionState = book.missionState;
+    const rows = buildRows(book);
+    const summary = {
+        今日の日付: todayStr(),
+        missionState_date: missionState ? missionState.date : null,
+        missionState_schemaVersion: missionState ? missionState.schemaVersion : null,
+        missionState_items数: missionState ? missionState.items.length : 0,
+        missionState_doneKeys数: missionState ? (missionState.doneKeys || []).length : 0,
+        現在buildRowsが返す行数: rows.length,
+    };
+    const fullJson = JSON.stringify({ summary, missionState, book }, null, 2);
+    return (React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(36,31,31,0.85)", zIndex: 50, display: "flex", flexDirection: "column", padding: 16 } },
+        React.createElement("div", { className: "flex items-center justify-between mb-2" },
+            React.createElement("div", { style: { fontFamily: FONT_DISPLAY, color: "#fff", fontSize: 14 } }, "🔍 デバッグ情報(コピーして貼り付けてね)"),
+            React.createElement("button", { onClick: onClose, style: { background: "#fff", border: "none", borderRadius: 8, padding: 6 } },
+                React.createElement(X, { color: C.ink, size: 18 }))),
+        React.createElement("div", { style: { fontSize: 11, color: "#fff", marginBottom: 6 } }, "▼下のテキストエリアを長押しして全選択→コピーして、チャットに貼り付けてください"),
+        React.createElement("textarea", { readOnly: true, value: fullJson, onFocus: (e) => e.target.select(), style: { flex: 1, width: "100%", fontFamily: "monospace", fontSize: 11, padding: 10, borderRadius: 8, border: "none", resize: "none" } })));
+}
+/* ================= Today's Task List ================= */
+function TodayView({ book, onUpdateBook }) {
+    const [burstId, setBurstId] = useState(null);
+    const [showLater, setShowLater] = useState(false);
+    const [showDebug, setShowDebug] = useState(false);
+    const todayKey = todayStr();
+    const rows = buildRows(book);
+    const dailyHours = book.dailyHours || 3;
+    const dayBiasDiff = targetDifficultyForDay(book);
+    const biasedRows = reorderForDayBias(rows, dayBiasDiff);
+    // 高難易度が1つでも残っていれば、先頭2件(露払い+高難易度)を予算オーバーでも保証する。
+    // 残っていなければ、従来通り先頭1件だけを保証する。
+    const guaranteedCount = rows.some((r) => getKomaDifficulty(r.koma) === "high") ? 2 : 1;
+    const missionNeedsRegen = !book.missionState || book.missionState.date !== todayKey || book.missionState.schemaVersion !== MISSION_SCHEMA_VERSION;
+    useEffect(() => {
+        if (missionNeedsRegen) {
+            onUpdateBook({ ...book, missionState: buildMission(biasedRows, dailyHours, todayKey, guaranteedCount) });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [missionNeedsRegen, todayKey]);
+    const mission = missionNeedsRegen ? buildMission(biasedRows, dailyHours, todayKey, guaranteedCount) : book.missionState;
+    const plannedKeySet = new Set(mission.items.map((i) => i.key));
+    const doneKeySet = new Set(mission.doneKeys || []);
+    const missionRows = rows.filter((r) => plannedKeySet.has(rowKey(r)) && !doneKeySet.has(rowKey(r)));
+    const laterRows = rows.filter((r) => !plannedKeySet.has(rowKey(r)) || doneKeySet.has(rowKey(r)));
+    const laterHours = laterRows.reduce((s, r) => s + rowHours(r), 0);
+    const doneItems = mission.items.filter((i) => doneKeySet.has(i.key));
+    const doneHours = doneItems.reduce((s, i) => s + i.hours, 0);
+    const totalHours = mission.items.reduce((s, i) => s + i.hours, 0);
+    const doneCount = doneItems.length;
+    const totalCount = mission.items.length;
+    const pct = totalHours > 0 ? clamp((doneHours / totalHours) * 100, 0, 100) : 100;
+    const burst = (id) => { setBurstId(id); setTimeout(() => setBurstId(null), 850); };
+    const markDoneIfPlanned = (key) => {
+        if (!plannedKeySet.has(key) || doneKeySet.has(key))
+            return mission;
+        return { ...mission, doneKeys: [...(mission.doneKeys || []), key] };
+    };
+    /** タスク完了後、同じページ内で新たに着手可能になったタスク(自分自身の次工程はもちろん、
+     *  ページの③線画が全コマ揃ったことで他コマの④仕上げが解禁されるケースも含む)を
+     *  今日のミッションに追加する。ただし完了したタスク自体が今日のミッション計画に
+     *  含まれていた場合のみ(後日ぶんを先取りで進めた場合まで連鎖させない)。 */
+    const applyUpdate = (updatedBookFields, completedKey, groupId) => {
+        const updatedBook = { ...book, ...updatedBookFields };
+        let nextMissionState = markDoneIfPlanned(completedKey);
+        if (groupId && plannedKeySet.has(completedKey)) {
+            const newRowsInGroup = buildRows(updatedBook).filter((r) => r.groupId === groupId);
+            newRowsInGroup.forEach((newRow) => {
+                const newKey = rowKey(newRow);
+                const alreadyPlanned = nextMissionState.items.some((i) => i.key === newKey);
+                const alreadyDone = (nextMissionState.doneKeys || []).includes(newKey);
+                if (!alreadyPlanned && !alreadyDone) {
+                    nextMissionState = {
+                        ...nextMissionState,
+                        items: [...nextMissionState.items, { key: newKey, hours: rowHours(newRow), label: newRow.label, title: rowTitle(newRow) }],
+                    };
+                }
+            });
+        }
+        onUpdateBook({ ...updatedBook, missionState: nextMissionState });
+    };
+    const completeKoma = (row) => {
+        const { groupId, koma } = row;
+        const komaId = koma.id;
+        const completedKey = rowKey(row); // 更新前の(今まさに完了した)工程の識別番号を確定させておく
+        burst(komaId);
+        const today = todayStr();
+        const fields = { pages: book.pages.map((p) => (p.id !== groupId ? p : { ...p, komas: p.komas.map((k) => (k.id === komaId ? { ...k, stage: k.stage + 1, lastProgressDate: today } : k)) })) };
+        applyUpdate(fields, completedKey, groupId);
+    };
+    const onCompleteRow = (row) => completeKoma(row);
+    /** コマの工程を1つ以上戻す(やり直し・ボツ)。stage0(①アタリ未着手)より前には戻せない。 */
+    const resetKoma = (row, targetStage) => {
+        const { groupId, koma } = row;
+        const komaId = koma.id;
+        const today = todayStr();
+        const clampedTarget = Math.max(0, targetStage);
+        const fields = { pages: book.pages.map((p) => (p.id !== groupId ? p : { ...p, komas: p.komas.map((k) => (k.id === komaId ? { ...k, stage: clampedTarget, lastProgressDate: today } : k)) })) };
+        // このコマに紐づく完了記録は、工程が違っても識別番号の接頭辞が共通なので
+        // まとめて外す(戻す前の工程がどれだったか気にせず安全にクリアできる)。
+        const komaKeyPrefix = `koma-${komaId}-`;
+        const nextDoneKeys = (mission.doneKeys || []).filter((k) => !k.startsWith(komaKeyPrefix));
+        const nextMissionState = { ...mission, doneKeys: nextDoneKeys };
+        onUpdateBook({ ...book, ...fields, missionState: nextMissionState });
+    };
+    const coverWidget = React.createElement(CoverProgressCard, { cover: book.cover, onUpdateCover: (cover) => onUpdateBook({ ...book, cover }) });
+    if (rows.length === 0) {
+        return (React.createElement("div", { className: "p-4 space-y-4" },
+            coverWidget,
+            React.createElement("div", { style: { fontSize: 12, color: C.inkSoft } }, `着手${elapsedDayNumber(book.startDate, todayKey)}日目`),
+            React.createElement("div", { className: "p-8 text-center", style: { color: C.inkSoft } },
+                React.createElement(Sparkles, { className: "mx-auto mb-2", color: C.pink }),
+                "今日のタスクはありません。完成おめでとう、または次のページ登録を！")));
+    }
+    const dayNumber = elapsedDayNumber(book.startDate, todayKey);
+    const laterSection = laterRows.length > 0 ? (React.createElement("div", null,
+        React.createElement("button", { onClick: () => setShowLater((v) => !v), className: "flex items-center gap-1.5 w-full justify-center rounded-lg", style: { fontFamily: FONT_DISPLAY, fontSize: 13, color: C.inkSoft, border: `2px dashed ${C.inkSoft}`, background: "transparent", minHeight: 52, padding: "14px 12px" } },
+            "後日ぶん (",
+            laterRows.length,
+            "個 ・ ",
+            laterHours.toFixed(1),
+            "h) ",
+            showLater ? React.createElement(ChevronUp, { size: 16 }) : React.createElement(ChevronDown, { size: 16 })),
+        showLater && (React.createElement("div", { className: "mt-2" },
+            React.createElement(RowList, { rows: laterRows, burstId: burstId, faded: true, onCompleteRow: onCompleteRow, onResetRow: resetKoma }))))) : null;
+    return (React.createElement("div", { className: "p-4 space-y-4" },
+        coverWidget,
+        React.createElement("div", { className: "flex items-center justify-between" },
+            React.createElement("div", { style: { fontFamily: FONT_DISPLAY, fontSize: 15, color: C.ink } }, "🎯 今日のミッション"),
+            React.createElement("button", { onClick: () => setShowDebug(true), style: { fontSize: 11, color: C.inkSoft, border: `1.5px dashed ${C.inkSoft}`, borderRadius: 6, padding: "2px 8px" } }, "🔍デバッグ")),
+        React.createElement("div", { style: { fontSize: 12, color: C.inkSoft, marginBottom: totalCount > 0 ? 4 : 0 } },
+            `着手${dayNumber}日目`,
+            totalCount > 0 && ` ・ 本日 ${doneHours.toFixed(1)}h / ${totalHours.toFixed(1)}h ・ ${doneCount}/${totalCount}個完了`),
+        totalCount > 0 && (React.createElement("div", null,
+            React.createElement("div", { style: { height: 14, border: `2px solid ${C.ink}`, borderRadius: 6, overflow: "hidden", background: "#fff" } },
+                React.createElement("div", { style: { height: "100%", width: `${pct}%`, background: C.mint, transition: "width .4s" } })))),
+        missionRows.length > 0 ? (React.createElement(RowList, { rows: missionRows, burstId: burstId, faded: false, onCompleteRow: onCompleteRow, onResetRow: resetKoma })) : (React.createElement("div", { className: "p-4 text-center rounded-lg", style: { border: `2px dashed ${C.mint}`, color: C.inkSoft, fontSize: 13 } }, "🎉 今日のミッション達成！お疲れさま。")),
+        laterSection,
+        showDebug && React.createElement(DebugPanel, { book: book, onClose: () => setShowDebug(false) }),
+        React.createElement("div", { className: "bottom-safe-spacer" })));
+}
+/* ================= Dashboard ================= */
+function DashboardView({ book }) {
+    const stats = computeStats(book);
+    const remainingFeas = computeRemainingFeasibility(book, stats);
+    const gs = groups(book).filter((g) => g.komas.length > 0);
+    const allKomas = gs.flatMap((g) => g.komas);
+    const totalKomas = allKomas.length || 1;
+    const atariPct = (allKomas.filter((k) => k.stage >= 1).length / totalKomas) * 100;
+    const roughPct = (allKomas.filter((k) => k.stage >= 2).length / totalKomas) * 100;
+    const sengaPct = (allKomas.filter((k) => k.stage >= 3).length / totalKomas) * 100;
+    const shiagePct = (allKomas.filter((k) => k.stage >= 4).length / totalKomas) * 100;
+    const stageDone = [atariPct, roughPct, sengaPct, shiagePct];
+    return (React.createElement("div", { className: "p-4 space-y-5" },
+        !remainingFeas.ok && (React.createElement("div", { style: { border: `2.5px solid ${C.red}`, background: "#FFF0EF", borderRadius: 10, padding: 12, display: "flex", gap: 8 } },
+            React.createElement(AlertTriangle, { color: C.red, size: 20, style: { flexShrink: 0, marginTop: 2 } }),
+            React.createElement("div", { style: { fontSize: 13, color: C.ink } }, `このままのペースでは締切に間に合いません。残り${remainingFeas.daysLeft}日 × 1日${book.dailyHours}h = ${remainingFeas.availableHours.toFixed(1)}h確保できますが、残り作業は${remainingFeas.remainingHours.toFixed(1)}h必要です(不足${remainingFeas.shortfall.toFixed(1)}h)。進捗が追いつけばこの表示は自動的に消えます。`))),
+        stats.suggestion && (React.createElement("div", { style: { border: `2.5px solid ${C.red}`, background: "#FFF0EF", borderRadius: 10, padding: 12, display: "flex", gap: 8 } },
+            React.createElement(AlertTriangle, { color: C.red, size: 20, style: { flexShrink: 0, marginTop: 2 } }),
+            React.createElement("div", { style: { fontSize: 13, color: C.ink } }, stats.suggestion))),
+        React.createElement("div", null,
+            React.createElement("div", { style: { fontFamily: FONT_DISPLAY, fontSize: 13, color: C.ink, marginBottom: 6 } }, "工程別 進捗"),
+            React.createElement("div", { className: "space-y-2" }, STAGE_SHORT.map((label, i) => (React.createElement("div", { key: label },
+                React.createElement("div", { style: { fontSize: 12, color: C.inkSoft, marginBottom: 2 } }, STAGE_LABELS[i]),
+                React.createElement("div", { style: { height: 14, border: `2px solid ${C.ink}`, borderRadius: 6, overflow: "hidden", background: "#fff" } },
+                    React.createElement("div", { style: { height: "100%", width: `${stageDone[i]}%`, background: C.pink, transition: "width .4s" } }))))))),
+        React.createElement("div", { style: { fontSize: 12, color: C.inkSoft } },
+            "🎨 表紙: ",
+            book.cover.stage >= 5 ? "全工程完了" : `${COVER_STAGES[book.cover.stage]}(${book.cover.progressPct || 0}%)`,
+            " ／ タイトルロゴ: ",
+            book.cover.titleLogoDone ? "完了" : "未完了"),
+        React.createElement("div", null,
+            React.createElement("div", { className: "flex items-center gap-2 mb-1" },
+                React.createElement(DangerDot, { level: stats.sengaDanger }),
+                React.createElement("span", { style: { fontFamily: FONT_DISPLAY, fontSize: 13, color: C.ink } }, "線画ライン(生存)")),
+            React.createElement("div", { style: { fontSize: 11, color: C.inkSoft, marginBottom: 2 } },
+                "必達 ",
+                stats.requiredSenga.toFixed(0),
+                "% ／ 実績 ",
+                stats.actualSenga.toFixed(0),
+                "%(時間換算)"),
+            React.createElement(Bar, { actual: stats.actualSenga, required: stats.requiredSenga, color: C.mint })),
+        React.createElement("div", null,
+            React.createElement("div", { className: "flex items-center gap-2 mb-1" },
+                React.createElement(DangerDot, { level: stats.shiageDanger }),
+                React.createElement("span", { style: { fontFamily: FONT_DISPLAY, fontSize: 13, color: C.ink } }, "仕上げライン")),
+            React.createElement("div", { style: { fontSize: 11, color: C.inkSoft, marginBottom: 2 } },
+                "必達 ",
+                stats.requiredShiage.toFixed(0),
+                "% ／ 実績 ",
+                stats.actualShiage.toFixed(0),
+                "%(時間換算)"),
+            React.createElement(Bar, { actual: stats.actualShiage, required: stats.requiredShiage, color: C.pink })),
+        React.createElement("div", { style: { fontSize: 11, color: C.inkSoft } },
+            "線画目標日: ",
+            stats.sengaTargetDate,
+            " ／ 締切: ",
+            book.deadline)));
+}
+/* ================= Book View ================= */
+function BookView({ book, onBack, onUpdateBook, onDelete, onEdit, syncStatus }) {
+    const [sub, setSub] = useState("today");
+    const stats = computeStats(book);
+    const remainingFeas = computeRemainingFeasibility(book, stats);
+    const daysLeft = daysBetween(todayStr(), book.deadline);
+    return (React.createElement("div", { className: "min-h-full", style: { background: C.paper } },
+        React.createElement("div", { className: "p-4 pb-2" },
+            React.createElement("div", { className: "flex items-center justify-between" },
+                React.createElement("button", { onClick: onBack },
+                    React.createElement(ChevronLeft, { color: C.ink })),
+                React.createElement("div", { className: "flex items-center gap-3" },
+                    React.createElement(SyncBadge, { status: syncStatus }),
+                    React.createElement("button", { onClick: onEdit },
+                        React.createElement(Pencil, { size: 17, color: C.inkSoft })),
+                    React.createElement("button", { onClick: () => window.confirm(`「${book.title}」を削除しますか？`) && onDelete() },
+                        React.createElement(Trash2, { size: 17, color: C.inkSoft })))),
+            React.createElement("div", { style: { fontSize: 11, color: C.inkSoft, marginTop: 6 } }, "作品名"),
+            React.createElement("div", { className: "flex items-center gap-2" },
+                React.createElement(DangerDot, { level: stats.overallDanger }),
+                React.createElement("h2", { className: "font-display text-lg", style: { color: C.ink } }, book.title),
+                !remainingFeas.ok && React.createElement(AlertTriangle, { size: 16, color: C.red, title: `残り${remainingFeas.daysLeft}日 × 1日${book.dailyHours}h = ${remainingFeas.availableHours.toFixed(1)}h確保できますが、残り作業は${remainingFeas.remainingHours.toFixed(1)}h必要です(不足${remainingFeas.shortfall.toFixed(1)}h)` })),
+            React.createElement("div", { style: { fontSize: 12, color: C.inkSoft, marginTop: 2 } },
+                "総",
+                book.totalPages,
+                "ページ ・ 締切 ",
+                book.deadline,
+                "(",
+                daysLeft >= 0 ? `あと${daysLeft}日` : `${-daysLeft}日超過`,
+                ")"),
+            !remainingFeas.ok && React.createElement("div", { style: { fontSize: 12, color: C.red, fontWeight: 700, marginTop: 4 } },
+                `⚠ 残り作業${remainingFeas.remainingHours.toFixed(1)}h / 確保できる時間${remainingFeas.availableHours.toFixed(1)}h(不足${remainingFeas.shortfall.toFixed(1)}h)`),
+            React.createElement("div", { className: "flex gap-2 mt-3" }, [["today", "今日のタスク"], ["dashboard", "進捗"]].map(([key, label]) => (React.createElement("button", { key: key, onClick: () => setSub(key), className: "px-3 py-1.5 rounded-full", style: { fontFamily: FONT_DISPLAY, fontSize: 12, border: `2px solid ${C.ink}`, background: sub === key ? C.pink : "#fff", color: sub === key ? "#fff" : C.ink } }, label))))),
+        sub === "today" ? React.createElement(TodayView, { book: book, onUpdateBook: onUpdateBook }) : React.createElement(DashboardView, { book: book })));
+}
+/* ================= Tabs / Home ================= */
+function TabsScreen({ books, onOpen, onAdd, syncStatus }) {
+    const started = books.filter((b) => b.startDate <= todayStr());
+    const waiting = books.filter((b) => b.startDate > todayStr());
+    return (React.createElement("div", { className: "min-h-full p-4", style: { background: C.paper } },
+        React.createElement("div", { className: "flex items-center justify-between mb-1" },
+            React.createElement("h1", { className: "font-display text-2xl", style: { color: C.ink } }, "コマミッション"),
+            React.createElement(SyncBadge, { status: syncStatus })),
+        React.createElement("p", { style: { color: C.inkSoft, fontSize: 13, marginBottom: 16 } }, "本を選んで、今日のコマに取り掛かる"),
+        React.createElement("div", { className: "flex flex-wrap gap-2 mb-6" },
+            started.map((b, i) => (React.createElement("button", { key: b.id, onClick: () => onOpen(b.id), style: { fontFamily: FONT_DISPLAY, fontSize: 13, padding: "10px 16px", border: `2.5px solid ${C.ink}`, borderRadius: 10, background: "#fff", boxShadow: `3px 3px 0 ${C.ink}`, transform: `rotate(${i % 2 === 0 ? -1.5 : 1.5}deg)` } }, b.title))),
+            React.createElement("button", { onClick: onAdd, style: { fontFamily: FONT_DISPLAY, fontSize: 13, padding: "10px 16px", border: `2.5px dashed ${C.ink}`, borderRadius: 10, background: "transparent", color: C.inkSoft, display: "flex", alignItems: "center", gap: 4 } },
+                React.createElement(Plus, { size: 14 }),
+                " 本を追加")),
+        waiting.length > 0 && (React.createElement("div", null,
+            React.createElement("div", { style: { fontSize: 12, color: C.inkSoft, marginBottom: 6 } }, "待機中(着手前)"),
+            React.createElement("div", { className: "flex flex-wrap gap-2" }, waiting.map((b) => (React.createElement("button", { key: b.id, onClick: () => onOpen(b.id), style: { fontFamily: FONT_DISPLAY, fontSize: 12, padding: "8px 14px", border: `2px solid ${C.inkSoft}`, borderRadius: 10, background: "#f2f2f2", color: C.inkSoft } },
+                b.title,
+                " (",
+                b.startDate,
+                "〜)")))))),
+        books.length === 0 && React.createElement("div", { className: "mt-10 text-center", style: { color: C.inkSoft, fontSize: 13 } }, "まだ本が登録されていません。「本を追加」から始めよう。")));
+}
+/* ================= Error Boundary ================= */
+class ErrorBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { error: null };
+    }
+    static getDerivedStateFromError(error) {
+        return { error };
+    }
+    render() {
+        if (this.state.error) {
+            return (React.createElement("div", { style: { minHeight: "100vh", background: "#FFF0EF", padding: 20, fontFamily: FONT_BODY } },
+                React.createElement("h2", { style: { fontFamily: FONT_DISPLAY, color: C.red, fontSize: 18, marginBottom: 10 } }, "⚠ エラーが発生しました"),
+                React.createElement("div", { style: { fontSize: 13, color: C.ink, whiteSpace: "pre-wrap", background: "#fff", border: `2px solid ${C.red}`, borderRadius: 8, padding: 10 } }, String(this.state.error && this.state.error.message ? this.state.error.message : this.state.error)),
+                React.createElement("button", { onClick: () => this.setState({ error: null }), style: { marginTop: 14, padding: "8px 16px", border: `2px solid ${C.ink}`, borderRadius: 8, background: "#fff", fontFamily: FONT_DISPLAY } }, "戻る")));
+        }
+        return this.props.children;
+    }
+}
+/* ================= App ================= */
+function AppInner() {
+    const [books, setBooks] = useState([]);
+    const [loaded, setLoaded] = useState(false);
+    const [view, setView] = useState("tabs");
+    const [selectedId, setSelectedId] = useState(null);
+    const [syncStatus, setSyncStatus] = useState("idle"); // idle|saving|firebase|local|error
+    useEffect(() => {
+        (async () => {
+            const { json } = await loadBooksJson();
+            if (json) {
+                try {
+                    const parsed = JSON.parse(json);
+                    setBooks(parsed.map(migrateBook));
+                }
+                catch (e) { }
+            }
+            setLoaded(true);
+        })();
+    }, []);
+    useEffect(() => {
+        if (!loaded)
+            return;
+        setSyncStatus("saving");
+        (async () => {
+            const result = await saveBooksJson(JSON.stringify(books));
+            setSyncStatus(result);
+        })();
+    }, [books, loaded]);
+    const selectedBook = books.find((b) => b.id === selectedId);
+    return (React.createElement("div", { style: { minHeight: "100vh", background: C.paper } },
+        React.createElement(FontLoader, null),
+        view === "tabs" && React.createElement(TabsScreen, { books: books, syncStatus: syncStatus, onOpen: (id) => { setSelectedId(id); setView("book"); }, onAdd: () => setView("register") }),
+        view === "register" && React.createElement(RegisterWizard, { onCancel: () => setView("tabs"), onSave: (book) => { setBooks((b) => [...b, book]); setView("tabs"); } }),
+        view === "book" && selectedBook && (React.createElement(BookView, { book: selectedBook, syncStatus: syncStatus, onBack: () => setView("tabs"), onUpdateBook: (updated) => setBooks((bs) => bs.map((b) => (b.id === updated.id ? updated : b))), onDelete: () => { setBooks((bs) => bs.filter((b) => b.id !== selectedBook.id)); setView("tabs"); }, onEdit: () => setView("edit") })),
+        view === "edit" && selectedBook && (React.createElement(EditBookScreen, { book: selectedBook, onCancel: () => setView("book"), onSave: (updated) => { setBooks((bs) => bs.map((b) => (b.id === updated.id ? updated : b))); setView("book"); } }))));
+}
+function App() {
+    return (React.createElement(ErrorBoundary, null,
+        React.createElement(AppInner, null)));
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
